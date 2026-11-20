@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f5f6f8">
+    <title>Meridian — Merchant operations</title>
+    <link rel="stylesheet" href="app.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#" aria-label="Meridian home">
+          <span class="brand-mark">m</span>
+          <span>meridian<span class="brand-period">.</span></span>
+        </a>
+        <div class="workspace-label">WORKSPACE</div>
+        <nav class="primary-nav" aria-label="Primary navigation">
+          <a class="nav-item active" href="#queue"><span class="nav-icon">▦</span> Onboarding <span class="nav-count" id="nav-count">0</span></a>
+          <a class="nav-item" href="#queue" data-static-nav><span class="nav-icon">◷</span> Reviews</a>
+          <a class="nav-item" href="#queue" data-static-nav><span class="nav-icon">⌁</span> Activity</a>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="environment"><span class="live-dot"></span> Sandbox environment</div>
+          <button class="profile-button" type="button" aria-label="Operator profile">
+            <span class="avatar">JD</span>
+            <span class="profile-copy"><strong>Jordan Davis</strong><small>Operations</small></span>
+            <span class="profile-more">···</span>
+          </button>
+        </div>
+      </aside>
+
+      <main class="main-content" id="queue">
+        <header class="topbar">
+          <div class="breadcrumbs">Operations <span>/</span> Merchant onboarding</div>
+          <div class="topbar-actions"><span class="secure-label"><span>◆</span> Secure workspace</span><button class="icon-button" type="button" aria-label="Notifications">♧<i></i></button></div>
+        </header>
+        <section class="page-heading">
+          <div>
+            <div class="eyebrow"><span class="live-dot"></span> MERCHANT OPERATIONS</div>
+            <h1>Merchant onboarding</h1>
+            <p>Review applications, resolve exceptions, and get merchants ready to process.</p>
+          </div>
+          <button class="button button-primary" id="new-application"><span class="plus">+</span> New application</button>
+        </section>
+
+        <section class="metrics" aria-label="Onboarding metrics">
+          <article class="metric-card"><div class="metric-label">Total applications <span class="metric-icon purple">▦</span></div><div class="metric-value" id="metric-total">0</div><div class="metric-note">Across all statuses</div></article>
+          <article class="metric-card"><div class="metric-label">In progress <span class="metric-icon blue">◷</span></div><div class="metric-value" id="metric-progress">0</div><div class="metric-note">Awaiting checks or review</div></article>
+          <article class="metric-card"><div class="metric-label">Needs attention <span class="metric-icon amber">!</span></div><div class="metric-value" id="metric-attention">0</div><div class="metric-note">Exceptions and missing info</div></article>
+          <article class="metric-card"><div class="metric-label">Approved <span class="metric-icon green">✓</span></div><div class="metric-value" id="metric-approved">0</div><div class="metric-note">Ready to process</div></article>
+          <article class="metric-card"><div class="metric-label">Avg. time in state <span class="metric-icon blue">◷</span></div><div class="metric-value" id="metric-time-in-state">0m</div><div class="metric-note" id="metric-time-note">Across active applications</div></article>
+          <article class="metric-card"><div class="metric-label">Exception rate <span class="metric-icon amber">!</span></div><div class="metric-value" id="metric-exception-rate">0%</div><div class="metric-note" id="metric-exception-note">Applications with exception history</div></article>
+        </section>
+
+        <section class="provider-analytics panel" aria-label="Provider performance">
+          <div class="panel-heading">
+            <div><h2>Provider performance</h2><p>Latency and callback volume over 24 hours · completion across eligible attempts</p></div>
+            <span class="analytics-window">Local demo data</span>
+          </div>
+          <div class="provider-analytics-kpis">
+            <article><span>Average response latency</span><strong id="metric-provider-latency">—</strong><small id="metric-provider-latency-note">No callbacks yet</small></article>
+            <article><span>Callbacks received</span><strong id="metric-provider-throughput">0</strong><small>Responses in the last 24 hours</small></article>
+            <article><span>Request completion</span><strong id="metric-provider-completion">—</strong><small id="metric-provider-completion-note">No provider requests yet</small></article>
+          </div>
+          <div class="provider-breakdown" id="provider-breakdown" aria-live="polite"></div>
+        </section>
+
+        <section class="workspace-grid">
+          <section class="queue-panel panel">
+            <div class="panel-heading queue-heading">
+              <div><h2>Applications <span class="heading-count" id="queue-count">0</span></h2><p>Track every merchant from submission to activation.</p></div>
+              <button class="button button-subtle" id="refresh-queue" type="button"><span class="refresh-icon">↻</span> Refresh</button>
+            </div>
+            <div class="queue-toolbar">
+              <label class="search-box"><span>⌕</span><input id="search-input" type="search" placeholder="Search merchants..." aria-label="Search merchants"></label>
+              <label class="select-wrap"><span class="sr-only">Filter applications</span><select id="status-filter"><option value="all">All statuses</option><option value="in_progress">In progress</option><option value="needs_attention">Needs attention</option><option value="approved">Approved</option></select></label>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>MERCHANT</th><th>SUBMITTED</th><th>STATUS</th><th>CHECKS</th><th></th></tr></thead>
+                <tbody id="application-rows"></tbody>
+              </table>
+              <div class="empty-state hidden" id="empty-state"><span class="empty-icon">⌕</span><strong>No applications found</strong><span>Try changing your search or status filter.</span></div>
+            </div>
+            <div class="table-footer"><span id="results-label"></span><span class="footer-hint"><span class="live-dot"></span> Updates automatically</span></div>
+          </section>
+
+          <aside class="detail-panel panel" id="detail-panel" aria-live="polite">
+            <div class="detail-empty"><span class="detail-empty-icon">↖</span><h2>Select an application</h2><p>Choose a merchant from the queue to review verification status, missing information, and recent activity.</p></div>
+          </aside>
+        </section>
+        <footer class="page-footer"><span>Meridian onboarding <span class="footer-dot">·</span> Sandbox mode</span><span>All changes are recorded in the application audit trail</span></footer>
+      </main>
+    </div>
+
+    <dialog id="application-dialog" class="modal">
+      <form id="application-form" method="dialog">
+        <div class="modal-header"><div><div class="eyebrow">NEW MERCHANT</div><h2>Start an application</h2><p>Enter the business details supplied by the merchant.</p></div><button class="icon-button modal-close" type="button" id="close-dialog" aria-label="Close dialog">×</button></div>
+        <div class="form-grid">
+          <label class="form-field full-width">Legal business name<input name="businessName" required maxlength="100" placeholder="e.g. Northstar Coffee Co."></label>
+          <label class="form-field">Contact name<input name="contactName" required maxlength="80" placeholder="e.g. Avery Chen"></label>
+          <label class="form-field">Email address<input name="email" type="email" required maxlength="120" placeholder="avery@business.com"></label>
+          <label class="form-field">PAN number<input name="pan" required maxlength="10" pattern="[A-Za-z]{5}[0-9]{4}[A-Za-z]" title="Enter a valid 10-character PAN" placeholder="ABCDE1234F"></label>
+          <label class="form-field">GSTIN<input name="gst" required maxlength="15" pattern="[0-9]{2}[A-Za-z0-9]{13}" title="Enter a valid 15-character GSTIN" placeholder="27ABCDE1234F1Z5"></label>
+          <label class="form-field full-width">Bank account number<input name="bankAccount" required inputmode="numeric" pattern="[0-9]{8,18}" title="Enter 8 to 18 digits" maxlength="18" placeholder="Account number"></label>
+          <label class="form-field full-width">Document file (optional)
+            <input id="document-file" name="documentFile" class="file-input" type="file" accept="application/pdf,image/png,image/jpeg,image/webp,image/bmp">
+            <small class="field-hint">PDF or image · up to 10 MB · PDFs up to 5 pages</small>
+          </label>
+          <div class="full-width extraction-tools">
+            <div class="extraction-actions">
+              <button class="button button-subtle button-small" id="extract-document" type="button" disabled>Extract fields from document</button>
+              <button class="button button-subtle button-small" id="clear-document" type="button" hidden>Remove file</button>
+            </div>
+            <div class="extraction-status" id="extraction-status" role="status" aria-live="polite">Choose a document to extract fields locally in this browser.</div>
+          </div>
+          <label class="form-field full-width" id="confidence-simulation-field">Extraction confidence (manual-entry simulation)
+            <select name="documentConfidence">
+              <option value="98">High · 98% confidence</option>
+              <option value="72">Low · 72% confidence (route to review)</option>
+            </select>
+          </label>
+          <label class="form-field full-width">Risk screening (simulation)
+            <select name="riskScore">
+              <option value="24">Standard · score 24/100</option>
+              <option value="82">High risk · score 82/100 (route to review)</option>
+            </select>
+          </label>
+          <label class="form-field full-width">Provider callback scenario (simulation)
+            <select name="callbackScenario">
+              <option value="standard">Standard callback</option>
+              <option value="duplicate_pan">PAN callback delivered twice</option>
+              <option value="late_bank_callback">Bank callback arrives after timeout</option>
+              <option value="duplicate_and_late_bank">Duplicate PAN and late bank callback</option>
+            </select>
+          </label>
+          <label class="form-field full-width">Merchant-ID provisioning (simulation)
+            <select name="provisioningScenario">
+              <option value="standard">Standard provisioning</option>
+              <option value="fail_once">Fail once, then allow safe retry</option>
+            </select>
+          </label>
+        </div>
+        <div class="form-note"><span>i</span> Uploaded files are processed in your browser and are not saved or sent to an application server. OCR libraries and English language data load from a CDN.</div>
+        <div class="modal-actions"><button class="button button-subtle" type="button" id="cancel-dialog">Cancel</button><button class="button button-primary" type="submit">Submit application <span>→</span></button></div>
+      </form>
+    </dialog>
+    <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
