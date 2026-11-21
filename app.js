@@ -44,7 +44,13 @@
   const $ = (selector) => document.querySelector(selector);
   const rowsEl = $("#application-rows");
   const detailEl = $("#detail-panel");
+  const appShell = $(".app-shell");
   const dialog = $("#application-dialog");
+  const loginDialog = $("#login-dialog");
+  const loginForm = $("#login-form");
+  const loginStatus = $("#login-status");
+  const loginSubmit = $("#login-submit");
+  const logoutButton = $("#logout-button");
   const documentInput = $("#document-file");
   const extractionButton = $("#extract-document");
   const clearDocumentButton = $("#clear-document");
@@ -59,6 +65,8 @@
   let applications = loadApplications();
   let backendEnabled = false;
   let backendWriteQueue = Promise.resolve();
+  let currentUser = null;
+  let csrfToken = null;
 
   function makeId() {
     return `APP-${Math.random().toString(36).slice(2, 6).toUpperCase()}${Date.now().toString().slice(-3)}`;
@@ -322,10 +330,16 @@
     return seeded;
   }
 
-  async function apiRequest(path, options) {
-    const response = await window.fetch(`${window.MERIDIAN_API_BASE_URL}${path}`, options);
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `Backend request failed with status ${response.status}.`);
+  async function apiRequest(path, options = {}) {
+    const requestOptions = { ...options };
+    const headers = { ...(requestOptions.headers || {}) };
+    if (!["GET", "HEAD"].includes(String(requestOptions.method || "GET").toUpperCase()) && csrfToken) {
+      headers["X-CSRF-Token"] = csrfToken;
+    }
+    requestOptions.headers = headers;
+    const response = await window.fetch(`${window.MERIDIAN_API_BASE_URL}${path}`, requestOptions);
+    const payload = response.status === 204 ? null : await response.json();
+    if (!response.ok) throw new Error(payload?.error || `Backend request failed with status ${response.status}.`);
     return payload;
   }
 
@@ -337,6 +351,46 @@
     });
   }
 
+  function showLoginDialog(message = "") {
+    loginStatus.textContent = message;
+    if (!loginDialog.open) loginDialog.showModal();
+  }
+
+  function showAuthenticatedWorkspace() {
+    $("#operator-name").textContent = currentUser.email;
+    $("#operator-role").textContent = currentUser.role[0].toUpperCase() + currentUser.role.slice(1);
+    logoutButton.hidden = false;
+    appShell.removeAttribute("inert");
+    appShell.setAttribute("aria-busy", "false");
+    syncDocumentSelection();
+    if (!applications.some((application) => application.id === selectedId)) {
+      selectedId = applications[0]?.id || null;
+    }
+    renderAll();
+  }
+
+  async function loadBackendApplications() {
+    const savedApplications = await apiRequest("/applications");
+    if (!Array.isArray(savedApplications)) throw new Error("Backend returned an invalid application list.");
+    backendEnabled = true;
+    if (savedApplications.length) {
+      const normalized = normalizeApplications(savedApplications);
+      applications = normalized.applications;
+      if (normalized.changed) {
+        for (const application of applications) await saveBackendApplication(application);
+      }
+    } else {
+      if (!applications.length) applications = initialApplications();
+      for (const application of applications) await saveBackendApplication(application);
+    }
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(applications));
+    } catch (error) {
+      console.error("Could not cache backend applications in this browser.", error);
+      toast("Applications loaded from the backend, but the browser cache could not be updated.", true);
+    }
+  }
+
   async function initializeBackend() {
     const apiBaseUrl = window.MERIDIAN_API_BASE_URL;
     if (!apiBaseUrl || typeof window.fetch !== "function") {
@@ -346,40 +400,83 @@
       return;
     }
 
-    const appShell = $(".app-shell");
     appShell.setAttribute("aria-busy", "true");
     appShell.setAttribute("inert", "");
+    applications = initialApplications();
+    selectedId = null;
     try {
-      const savedApplications = await apiRequest("/applications");
-      if (!Array.isArray(savedApplications)) throw new Error("Backend returned an invalid application list.");
-      backendEnabled = true;
-      if (savedApplications.length) {
-        const normalized = normalizeApplications(savedApplications);
-        applications = normalized.applications;
-        if (normalized.changed) {
-          for (const application of applications) await saveBackendApplication(application);
-        }
-        try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(applications));
-        } catch (error) {
-          console.error("Could not cache backend applications in this browser.", error);
-          toast("Applications loaded from the backend, but the browser cache could not be updated.", true);
-        }
-      } else {
-        for (const application of applications) await saveBackendApplication(application);
+      localStorage.removeItem(STORAGE_KEY);
+      const sessionState = await apiRequest("/session");
+      csrfToken = sessionState.csrfToken;
+      if (!sessionState.authenticated) {
+        showLoginDialog();
+        appShell.setAttribute("aria-busy", "false");
+        return;
       }
+      currentUser = sessionState.user;
+      await loadBackendApplications();
+      if (loginDialog.open) loginDialog.close();
+      showAuthenticatedWorkspace();
     } catch (error) {
       backendEnabled = false;
-      console.error("Could not load onboarding data from the backend.", error);
-      toast("Backend unavailable. This session is using browser-local storage.", true);
-    } finally {
-      appShell.removeAttribute("inert");
+      currentUser = null;
+      console.error("Could not initialize the authenticated backend session.", error);
+      showLoginDialog("The backend is unavailable. Try again after service has recovered.");
       appShell.setAttribute("aria-busy", "false");
-      syncDocumentSelection();
-      if (!applications.some((application) => application.id === selectedId)) {
-        selectedId = applications[0]?.id || null;
+    }
+  }
+
+  async function signIn(event) {
+    event.preventDefault();
+    if (!loginForm.reportValidity()) return;
+    loginSubmit.disabled = true;
+    loginStatus.textContent = "Signing in…";
+    const email = loginForm.elements.namedItem("email").value;
+    const passwordInput = loginForm.elements.namedItem("password");
+    try {
+      const result = await apiRequest("/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password: passwordInput.value })
+      });
+      csrfToken = result.csrfToken;
+      currentUser = result.user;
+      await loadBackendApplications();
+      loginDialog.close();
+      showAuthenticatedWorkspace();
+    } catch (error) {
+      currentUser = null;
+      backendEnabled = false;
+      loginStatus.textContent = error.message;
+    } finally {
+      passwordInput.value = "";
+      loginSubmit.disabled = false;
+    }
+  }
+
+  async function signOut() {
+    logoutButton.disabled = true;
+    try {
+      await apiRequest("/auth/logout", { method: "POST" });
+      backendEnabled = false;
+      currentUser = null;
+      csrfToken = null;
+      applications = [];
+      selectedId = null;
+      try {
+        localStorage.removeItem(STORAGE_KEY);
+      } catch (error) {
+        console.error("Could not clear the local application cache after sign out.", error);
+        toast("The local application cache could not be cleared.", true);
       }
+      appShell.setAttribute("inert", "");
+      logoutButton.hidden = true;
       renderAll();
+      showLoginDialog("You have signed out.");
+    } catch (error) {
+      toast(`Could not sign out: ${error.message}`, true);
+    } finally {
+      logoutButton.disabled = false;
     }
   }
 
@@ -558,6 +655,15 @@
     return ["·", "pending", "Pending"];
   }
 
+  function canReviewApplication() {
+    return !backendEnabled || ["admin", "reviewer"].includes(currentUser?.role);
+  }
+
+  function canChangeBankForCurrentUser(app) {
+    return BANK_CHANGE_STATES.has(app.status)
+      && (canReviewApplication() || ["submitted", "needs_review"].includes(app.status));
+  }
+
   function renderDetail() {
     const app = applications.find((item) => item.id === selectedId);
     if (!app) {
@@ -567,6 +673,7 @@
     const allPassed = CHECK_ORDER.every((key) => app.checks[key] === "passed");
     const pending = CHECK_ORDER.some((key) => ["pending", "running", "retrying"].includes(app.checks[key]));
     const failedKeys = CHECK_ORDER.filter((key) => app.checks[key] === "failed");
+    const canReview = canReviewApplication();
     const checksHtml = CHECK_ORDER.map((key) => {
       const [symbol, css, statusResult] = checkIconState(app.checks[key]);
       const result = app.checkFailureReasons?.[key] === "timed_out" ? "Timed out" : statusResult;
@@ -603,25 +710,25 @@
       : failedKeys.length
         ? `<div class="alert-box danger"><strong>Verification needs attention</strong>${failedKeys.map((key) => app.checkFailureReasons?.[key] === "timed_out" ? `${CHECK_LABELS[key]} provider response timed out.` : `${CHECK_LABELS[key]} did not match the submitted details.`).join("<br>")}<div class="alert-actions"><button class="button button-subtle button-small" data-action="retry-failed">Retry failed checks</button><button class="button button-subtle button-small" data-action="review">Escalate to reviewer</button></div></div>`
         : app.status === "needs_review" || app.status === "provisioning_failed"
-          ? `<div class="alert-box danger"><strong>${app.status === "provisioning_failed" ? "Merchant ID creation failed" : "Manual review required"}</strong>${esc(app.reviewNote || "An operator must review this application before it can proceed.")}${duplicateMatches ? `<div class="duplicate-matches"><strong>Possible existing applications</strong><ul>${duplicateMatches}</ul></div>` : ""}<div class="alert-actions">${app.status === "provisioning_failed" ? '<button class="button button-subtle button-small" data-action="provision">Retry merchant ID creation</button>' : '<button class="button button-subtle button-small" data-action="review-clear">Resolve review</button>'}</div></div>`
+          ? `<div class="alert-box danger"><strong>${app.status === "provisioning_failed" ? "Merchant ID creation failed" : "Manual review required"}</strong>${esc(app.reviewNote || "An operator must review this application before it can proceed.")}${duplicateMatches ? `<div class="duplicate-matches"><strong>Possible existing applications</strong><ul>${duplicateMatches}</ul></div>` : ""}<div class="alert-actions">${canReview ? app.status === "provisioning_failed" ? '<button class="button button-subtle button-small" data-action="provision">Retry merchant ID creation</button>' : '<button class="button button-subtle button-small" data-action="review-clear">Resolve review</button>' : '<span class="field-hint">Reviewer or admin access is required to resolve this.</span>'}</div></div>`
           : app.status === "approved"
             ? `<div class="alert-box" style="border-color:#d9ecdf;background:#f5fbf7;color:#44735a"><strong>Merchant is ready</strong>Merchant ID <b>${esc(app.mid || "pending")}</b> is active in this sandbox.</div>`
             : "";
     const canStart = ["submitted", "needs_information"].includes(app.status) && pending;
     const canRequestInfo = ["submitted", "needs_review", "ready_for_approval"].includes(app.status);
-    const canChangeBank = BANK_CHANGE_STATES.has(app.status);
+    const canChangeBank = canChangeBankForCurrentUser(app);
     const actions = app.status === "approved"
-      ? `<button class="button button-subtle button-small" data-action="change-bank">Change bank details</button>`
+      ? canChangeBank ? `<button class="button button-subtle button-small" data-action="change-bank">Change bank details</button>` : ""
       : app.status === "needs_information"
         ? `<button class="button button-primary button-small" data-action="resume-info">Resume verification</button>`
         : app.status === "verifying"
           ? `<button class="button button-primary button-small button-disabled" disabled>Callbacks in progress…</button>`
           : app.status === "provisioning_failed"
-            ? `<button class="button button-subtle button-small" data-action="change-bank">Edit bank details</button>`
+            ? canChangeBank ? `<button class="button button-subtle button-small" data-action="change-bank">Edit bank details</button>` : ""
             : `<button class="button button-primary button-small ${canStart ? "" : "button-disabled"}" data-action="run-checks" ${canStart ? "" : "disabled"}>${allPassed ? "All checks passed" : "Run verification checks"} <span>→</span></button>
                ${canRequestInfo ? '<button class="button button-subtle button-small" data-action="need-info">Request information</button>' : ""}
                ${canChangeBank ? '<button class="button button-subtle button-small" data-action="change-bank">Edit bank details</button>' : ""}
-               ${app.status === "ready_for_approval" ? '<button class="button button-subtle button-small" data-action="approve">Approve application</button>' : ""}`;
+               ${app.status === "ready_for_approval" && canReview ? '<button class="button button-subtle button-small" data-action="approve">Approve application</button>' : ""}`;
     detailEl.innerHTML = `
       <div class="detail-header"><div class="detail-title-row"><div class="detail-merchant"><span class="merchant-avatar tone-${app._tone ?? 0}">${esc(initials(app.businessName))}</span><div><div class="detail-name">${esc(app.businessName)}</div><div class="detail-id">${esc(app.id)}</div></div></div><button class="icon-button" type="button" aria-label="More application actions" title="Application actions">···</button></div>
       <div class="detail-date">Submitted ${esc(formatDate(app.submittedAt))} · ${esc(app.contactName || "Merchant contact")}</div><div class="detail-status"><span class="status-pill ${statusClass(app.status)}">${esc(STATE_LABELS[app.status])}</span>${app.mid ? ` <span class="merchant-id">MID ${esc(app.mid)}</span>` : ""}</div></div>
@@ -678,6 +785,10 @@
       persist(app); renderAll(); toast("Application added to the review queue.");
     } else if (action === "review-clear") {
       if (app.status !== "needs_review") return;
+      if (!canReviewApplication()) {
+        toast("Reviewer or admin access is required to resolve this review.", true);
+        return;
+      }
       if (CHECK_ORDER.some((key) => app.checks[key] === "failed")) {
         toast("Retry failed provider checks before clearing this review.", true);
         return;
@@ -694,8 +805,16 @@
         startVerification(app);
       }
     } else if (action === "change-bank") {
+      if (!canChangeBankForCurrentUser(app)) {
+        toast("Reviewer or admin access is required to change these bank details.", true);
+        return;
+      }
       changeBank(app);
     } else if (action === "provision") {
+      if (!canReviewApplication()) {
+        toast("Reviewer or admin access is required to retry merchant-ID creation.", true);
+        return;
+      }
       createMerchantId(app);
     }
   }
@@ -930,6 +1049,10 @@
   }
 
   function approve(app) {
+    if (!canReviewApplication()) {
+      toast("Reviewer or admin access is required to approve applications.", true);
+      return;
+    }
     if (app.status !== "ready_for_approval" || !CHECK_ORDER.every((key) => app.checks[key] === "passed")) {
       toast("Approval is blocked until every verification check passes and the application is ready.", true);
       return;
@@ -1300,6 +1423,9 @@
   $("#search-input").addEventListener("input", (event) => { searchTerm = event.target.value.trim().toLowerCase(); renderQueue(); });
   $("#status-filter").addEventListener("change", (event) => { filterValue = event.target.value; renderQueue(); });
   $("#refresh-queue").addEventListener("click", () => { renderAll(); toast("Application queue refreshed."); });
+  loginForm.addEventListener("submit", signIn);
+  loginDialog.addEventListener("cancel", (event) => event.preventDefault());
+  logoutButton.addEventListener("click", signOut);
   document.querySelectorAll("[data-static-nav]").forEach((link) => link.addEventListener("click", (event) => {
     event.preventDefault();
     toast("This navigation item is not part of the onboarding demo.");

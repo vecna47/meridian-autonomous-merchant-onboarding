@@ -15,6 +15,8 @@ function createPostgresRepository(pool) {
   return {
     async health() {
       await pool.query("SELECT 1 FROM merchant_applications LIMIT 0");
+      await pool.query("SELECT 1 FROM merchant_users LIMIT 0");
+      await pool.query("SELECT 1 FROM merchant_sessions LIMIT 0");
     },
 
     async list() {
@@ -30,6 +32,33 @@ function createPostgresRepository(pool) {
         [id]
       );
       return result.rows[0]?.application || null;
+    },
+
+    async getUserByEmail(email) {
+      const result = await pool.query(
+        `SELECT id, email, password_hash AS "passwordHash", role, active
+         FROM merchant_users WHERE email = $1`,
+        [email]
+      );
+      return result.rows[0] || null;
+    },
+
+    async getUserById(id) {
+      const result = await pool.query(
+        "SELECT id, email, role, active FROM merchant_users WHERE id = $1",
+        [id]
+      );
+      return result.rows[0] || null;
+    },
+
+    async createUser(user) {
+      const result = await pool.query(
+        `INSERT INTO merchant_users (id, email, password_hash, role)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, email, role, active`,
+        [user.id, user.email, user.passwordHash, user.role]
+      );
+      return result.rows[0];
     },
 
     async save(application) {
