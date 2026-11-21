@@ -180,13 +180,22 @@ The sample queue will be recreated on reload.
 
 ## Validation
 
-There is no configured test runner or build pipeline. The JavaScript syntax can be checked with Node.js:
+Install the development dependency and run the automated browser-workflow tests with Node.js:
+
+```powershell
+npm install
+npm test
+```
+
+The suite uses Node's built-in test runner and jsdom to exercise application submission, exception routing, asynchronous provider callbacks, approval gates, provisioning recovery, and bank-detail invalidation. Document OCR itself requires a real browser and is not covered by the automated suite.
+
+The JavaScript syntax can also be checked directly:
 
 ```powershell
 node --check app.js
 ```
 
-The key demo flow can be validated manually using the **Try the demo** steps above.
+The document extraction flow can be validated manually using the **Try the demo** steps above.
 
 ## Assumptions and limitations
 
