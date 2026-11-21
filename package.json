@@ -2,7 +2,13 @@
   "name": "meridian-merchant-onboarding-demo",
   "private": true,
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "migrate": "node server/migrate.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "5.1.0",
+    "pg": "8.16.3"
   },
   "devDependencies": {
     "jsdom": "26.1.0"

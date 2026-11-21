@@ -39,16 +39,7 @@
     rejected: "Rejected",
     provisioning_failed: "Provisioning failed"
   };
-  const ALLOWED_TRANSITIONS = {
-    submitted: ["verifying", "needs_information", "needs_review"],
-    verifying: ["submitted", "ready_for_approval", "needs_review"],
-    needs_information: ["submitted", "verifying"],
-    needs_review: ["needs_information", "submitted", "ready_for_approval"],
-    ready_for_approval: ["approved", "needs_information", "submitted"],
-    approved: ["provisioning_failed", "submitted"],
-    provisioning_failed: ["approved", "submitted"],
-    rejected: []
-  };
+  const workflow = window.MeridianWorkflow;
   const BANK_CHANGE_STATES = new Set(["submitted", "needs_review", "ready_for_approval", "approved", "provisioning_failed"]);
   const $ = (selector) => document.querySelector(selector);
   const rowsEl = $("#application-rows");
@@ -66,6 +57,8 @@
   let extractingDocument = false;
   const timers = new Map();
   let applications = loadApplications();
+  let backendEnabled = false;
+  let backendWriteQueue = Promise.resolve();
 
   function makeId() {
     return `APP-${Math.random().toString(36).slice(2, 6).toUpperCase()}${Date.now().toString().slice(-3)}`;
@@ -136,7 +129,7 @@
 
   function transitionState(app, nextState, enteredAt = Date.now()) {
     if (app.status === nextState) return true;
-    if (!ALLOWED_TRANSITIONS[app.status]?.includes(nextState)) {
+    if (!workflow.canTransition(app.status, nextState)) {
       const currentLabel = STATE_LABELS[app.status] || app.status;
       const nextLabel = STATE_LABELS[nextState] || nextState;
       console.error(`Invalid onboarding state transition for ${app.id}: ${currentLabel} -> ${nextLabel}.`);
@@ -258,56 +251,61 @@
     return true;
   }
 
+  function normalizeApplications(records) {
+    let changed = false;
+    records.forEach((app) => {
+      if (!Array.isArray(app.stateHistory) || !Number.isFinite(app.stateSince)) changed = true;
+      ensureStateTracking(app);
+      if (typeof app.demoRiskTransientFailure !== "boolean") {
+        app.demoRiskTransientFailure = app.status !== "approved";
+        changed = true;
+      }
+      if (app.id === "APP-2026-0418" && typeof app.demoProvisioningFailure !== "boolean") {
+        app.demoProvisioningFailure = true;
+        changed = true;
+      }
+      if (!Array.isArray(app.providerRequests)) {
+        app.providerRequests = [];
+        changed = true;
+      }
+      if (app.status === "verifying") {
+        app.providerAttempts = app.providerAttempts || {};
+        app.activeProviderRequests = {};
+        CHECK_ORDER.forEach((key) => {
+          if (["running", "retrying"].includes(app.checks[key])) {
+            app.checks[key] = "pending";
+            app.providerAttempts[key] = 0;
+          }
+        });
+        app.providerRequests.forEach((request) => {
+          if (request.outcome === "pending") request.outcome = "interrupted";
+        });
+        transitionState(app, CHECK_ORDER.every((key) => app.checks[key] === "passed") ? "ready_for_approval" : "submitted");
+        app.audit.push({ at: Date.now(), message: "Browser session ended during provider checks; unfinished checks returned to pending." });
+        changed = true;
+      } else if (app.providerRequests.some((request) => request.outcome === "pending")) {
+        app.providerRequests.forEach((request) => {
+          if (request.outcome === "pending") request.outcome = "interrupted";
+        });
+        changed = true;
+      }
+      if (!app.activeProviderRequests) {
+        app.activeProviderRequests = {};
+        changed = true;
+      }
+    });
+    return { applications: records, changed };
+  }
+
   function loadApplications() {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) {
-          let changed = false;
-          parsed.forEach((app) => {
-            if (!Array.isArray(app.stateHistory) || !Number.isFinite(app.stateSince)) changed = true;
-            ensureStateTracking(app);
-            if (typeof app.demoRiskTransientFailure !== "boolean") {
-              app.demoRiskTransientFailure = app.status !== "approved";
-              changed = true;
-            }
-            if (app.id === "APP-2026-0418" && typeof app.demoProvisioningFailure !== "boolean") {
-              app.demoProvisioningFailure = true;
-              changed = true;
-            }
-            if (!Array.isArray(app.providerRequests)) {
-              app.providerRequests = [];
-              changed = true;
-            }
-            if (app.status === "verifying") {
-              app.providerAttempts = app.providerAttempts || {};
-              app.activeProviderRequests = {};
-              CHECK_ORDER.forEach((key) => {
-                if (["running", "retrying"].includes(app.checks[key])) {
-                  app.checks[key] = "pending";
-                  app.providerAttempts[key] = 0;
-                }
-              });
-              app.providerRequests.forEach((request) => {
-                if (request.outcome === "pending") request.outcome = "interrupted";
-              });
-              transitionState(app, CHECK_ORDER.every((key) => app.checks[key] === "passed") ? "ready_for_approval" : "submitted");
-              app.audit.push({ at: Date.now(), message: "Browser session ended during provider checks; unfinished checks returned to pending." });
-              changed = true;
-            } else if (app.providerRequests.some((request) => request.outcome === "pending")) {
-              app.providerRequests.forEach((request) => {
-                if (request.outcome === "pending") request.outcome = "interrupted";
-              });
-              changed = true;
-            }
-            if (!app.activeProviderRequests) {
-              app.activeProviderRequests = {};
-              changed = true;
-            }
-          });
-          if (changed) localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
-          return parsed;
+          const normalized = normalizeApplications(parsed);
+          if (normalized.changed) localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized.applications));
+          return normalized.applications;
         }
         throw new Error("Stored applications were not a list.");
       }
@@ -324,13 +322,86 @@
     return seeded;
   }
 
-  function persist() {
+  async function apiRequest(path, options) {
+    const response = await window.fetch(`${window.MERIDIAN_API_BASE_URL}${path}`, options);
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `Backend request failed with status ${response.status}.`);
+    return payload;
+  }
+
+  async function saveBackendApplication(application) {
+    return apiRequest(`/applications/${encodeURIComponent(application.id)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(application)
+    });
+  }
+
+  async function initializeBackend() {
+    const apiBaseUrl = window.MERIDIAN_API_BASE_URL;
+    if (!apiBaseUrl || typeof window.fetch !== "function") {
+      syncDocumentSelection();
+      if (applications.length && !selectedId) selectedId = applications[0].id;
+      renderAll();
+      return;
+    }
+
+    const appShell = $(".app-shell");
+    appShell.setAttribute("aria-busy", "true");
+    appShell.setAttribute("inert", "");
+    try {
+      const savedApplications = await apiRequest("/applications");
+      if (!Array.isArray(savedApplications)) throw new Error("Backend returned an invalid application list.");
+      backendEnabled = true;
+      if (savedApplications.length) {
+        const normalized = normalizeApplications(savedApplications);
+        applications = normalized.applications;
+        if (normalized.changed) {
+          for (const application of applications) await saveBackendApplication(application);
+        }
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(applications));
+        } catch (error) {
+          console.error("Could not cache backend applications in this browser.", error);
+          toast("Applications loaded from the backend, but the browser cache could not be updated.", true);
+        }
+      } else {
+        for (const application of applications) await saveBackendApplication(application);
+      }
+    } catch (error) {
+      backendEnabled = false;
+      console.error("Could not load onboarding data from the backend.", error);
+      toast("Backend unavailable. This session is using browser-local storage.", true);
+    } finally {
+      appShell.removeAttribute("inert");
+      appShell.setAttribute("aria-busy", "false");
+      syncDocumentSelection();
+      if (!applications.some((application) => application.id === selectedId)) {
+        selectedId = applications[0]?.id || null;
+      }
+      renderAll();
+    }
+  }
+
+  function persist(changedApplication = null) {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(applications));
     } catch (error) {
       console.error("Could not persist onboarding data.", error);
       toast("Changes could not be saved in this browser.", true);
     }
+    if (!backendEnabled) return;
+    const snapshots = (changedApplication ? [changedApplication] : applications)
+      .map((application) => JSON.parse(JSON.stringify(application)));
+    backendWriteQueue = backendWriteQueue.then(async () => {
+      for (const application of snapshots) {
+        await saveBackendApplication(application);
+      }
+    }).catch((error) => {
+      backendEnabled = false;
+      console.error("Could not persist onboarding data to the backend.", error);
+      toast("Backend save failed. Changes remain only in this browser.", true);
+    });
   }
 
   function esc(value) {
@@ -565,7 +636,7 @@
 
   function addAudit(app, message) {
     app.audit.push({ at: Date.now(), message });
-    persist();
+    persist(app);
   }
 
   function handleAction(action, id) {
@@ -584,19 +655,19 @@
       if (!transitionState(app, "needs_information")) return;
       app.missing = ["Please provide a clearer document or confirm the submitted business details."];
       addAudit(app, "Additional information requested by operator.");
-      persist(); renderAll(); toast("Information request recorded.");
+      persist(app); renderAll(); toast("Information request recorded.");
     } else if (action === "resolve-info") {
       if (app.status !== "needs_information") return;
       app.missing = [];
       if (!transitionState(app, "submitted")) return;
       addAudit(app, "Merchant information received; application is ready for verification.");
-      persist(); renderAll(); toast("Missing information marked as received.");
+      persist(app); renderAll(); toast("Missing information marked as received.");
     } else if (action === "resume-info") {
       if (app.status !== "needs_information") return;
       app.missing = [];
       if (!transitionState(app, "submitted")) return;
       addAudit(app, "Merchant information confirmed by operator.");
-      persist(); renderAll();
+      persist(app); renderAll();
       startVerification(app);
     } else if (action === "approve") {
       approve(app);
@@ -604,7 +675,7 @@
       if (app.status !== "needs_review" || !transitionState(app, "needs_review")) return;
       app.reviewNote = "A failed provider match requires human review.";
       addAudit(app, "Application escalated to human review after a failed provider check.");
-      persist(); renderAll(); toast("Application added to the review queue.");
+      persist(app); renderAll(); toast("Application added to the review queue.");
     } else if (action === "review-clear") {
       if (app.status !== "needs_review") return;
       if (CHECK_ORDER.some((key) => app.checks[key] === "failed")) {
@@ -615,11 +686,11 @@
       addAudit(app, "Operator resolved the manual review.");
       if (CHECK_ORDER.every((key) => app.checks[key] === "passed")) {
         if (!transitionState(app, "ready_for_approval")) return;
-        persist(); renderAll();
+        persist(app); renderAll();
         toast("Review resolved. The application is ready for approval.");
       } else {
         if (!transitionState(app, "submitted")) return;
-        persist(); renderAll();
+        persist(app); renderAll();
         startVerification(app);
       }
     } else if (action === "change-bank") {
@@ -653,7 +724,7 @@
     if (!toRun.length) {
       const nextState = CHECK_ORDER.every((key) => app.checks[key] === "passed") ? "ready_for_approval" : "needs_review";
       if (!transitionState(app, nextState)) return;
-      persist();
+      persist(app);
       renderAll();
       return;
     }
@@ -662,7 +733,7 @@
     toRun.forEach((key, index) => {
       scheduleProviderAttempt(app.id, key, 700 + index * 480);
     });
-    persist(); renderAll();
+    persist(app); renderAll();
     toast("Verification requests sent. Provider callbacks will arrive shortly.");
   }
 
@@ -747,7 +818,7 @@
     if (!app || !request || request.outcome !== "pending") return;
     if (app.status !== "verifying" || app.checks[key] !== "running" || app.activeProviderRequests?.[key] !== eventId) {
       request.outcome = "cancelled";
-      persist();
+      persist(app);
       return;
     }
     request.outcome = "timed_out";
@@ -760,7 +831,7 @@
     transitionState(app, "needs_review");
     app.reviewNote = `${CHECK_LABELS[key]} did not respond within ${timeoutDelay} ms. Any later callback for this request will be ignored; retry the check to continue.`;
     pauseVerificationForReview(app, `${CHECK_LABELS[key]} provider request timed out after ${timeoutDelay} ms.`, { key, eventId });
-    persist(); renderAll(); toast(`${CHECK_LABELS[key]} timed out and was routed to review.`, true);
+    persist(app); renderAll(); toast(`${CHECK_LABELS[key]} timed out and was routed to review.`, true);
   }
 
   function handleProviderCallback(appId, key, eventId, result, attempt) {
@@ -769,7 +840,7 @@
     app.processedCallbackIds = app.processedCallbackIds || [];
     if (app.processedCallbackIds.includes(eventId)) {
       addAudit(app, `Duplicate ${CHECK_LABELS[key]} callback ignored (${eventId}).`);
-      persist(); renderAll();
+      persist(app); renderAll();
       return;
     }
     app.processedCallbackIds.push(eventId);
@@ -792,7 +863,7 @@
       addAudit(app, request?.timedOutAt
         ? `Late ${CHECK_LABELS[key]} callback ignored after timeout (${eventId}); it did not change the check or application state.`
         : `Late ${CHECK_LABELS[key]} callback ignored (${eventId}); application is no longer awaiting this check.`);
-      persist(); renderAll();
+      persist(app); renderAll();
       return;
     }
     if (result === "transient_failure" && attempt < MAX_PROVIDER_ATTEMPTS) {
@@ -806,10 +877,10 @@
         if (!current || current.status !== "verifying" || current.checks[key] !== "retrying") return;
         current.checks[key] = "running";
         scheduleProviderAttempt(current.id, key, 700);
-        persist(); renderAll();
+        persist(current); renderAll();
       }, retryDelay);
       timers.set(timerKey, timer);
-      persist(); renderAll();
+      persist(app); renderAll();
       return;
     }
     const passed = result === "passed";
@@ -834,7 +905,7 @@
       transitionState(app, "ready_for_approval");
       addAudit(app, "All verification checks passed; application is ready for approval.");
     }
-    persist(); renderAll();
+    persist(app); renderAll();
   }
 
   function failedRetry(app) {
@@ -855,7 +926,7 @@
     app.demoLateCallback = false;
     app.reviewNote = "";
     addAudit(app, `Operator retried ${failed.map((key) => CHECK_LABELS[key]).join(", ")}.`);
-    persist(); renderAll(); startVerification(app);
+    persist(app); renderAll(); startVerification(app);
   }
 
   function approve(app) {
@@ -865,7 +936,7 @@
     }
     if (!transitionState(app, "approved")) return;
     addAudit(app, "Application approved by operator.");
-    persist(); renderAll();
+    persist(app); renderAll();
     createMerchantId(app);
   }
 
@@ -881,7 +952,7 @@
       app.provisioningAttempts = provisioningAttempt;
       app.reviewNote = "All checks passed and approval was recorded, but the simulated merchant-ID service is unavailable.";
       addAudit(app, "Merchant ID service failed after approval; safe to retry without duplicate creation.");
-      persist(); renderAll(); toast("Approval saved, but merchant ID creation failed. Retry is available.", true);
+      persist(app); renderAll(); toast("Approval saved, but merchant ID creation failed. Retry is available.", true);
       return;
     }
     if (!transitionState(app, "approved")) return;
@@ -889,7 +960,7 @@
     app.mid = `MID-${Math.floor(100000 + Math.random() * 900000)}`;
     app.reviewNote = "";
     addAudit(app, `Merchant ID ${app.mid} created and payment capabilities enabled.`);
-    persist(); renderAll(); toast(`Merchant approved. ${app.mid} is ready.`);
+    persist(app); renderAll(); toast(`Merchant approved. ${app.mid} is ready.`);
   }
 
   function changeBank(app) {
@@ -910,7 +981,7 @@
     app.bankChanged = true;
     app.reviewNote = "";
     addAudit(app, "Bank details changed by operator; bank and risk verification invalidated.");
-    persist(); renderAll(); toast("Bank details updated. Bank and risk checks must be run again.");
+    persist(app); renderAll(); toast("Bank details updated. Bank and risk checks must be run again.");
   }
 
   function renderAll() {
@@ -1302,7 +1373,7 @@
     const routedToConflictReview = !routedToDuplicateReview && routeForDocumentConflicts(app, documentConflicts, submittedAt);
     const routedToReview = routedToDuplicateReview || routedToConflictReview || routeForLowConfidence(app);
     applications.unshift(app);
-    persist();
+    persist(app);
     form.reset();
     syncDocumentSelection();
     dialog.close();
@@ -1318,8 +1389,6 @@
       : "Application submitted. Review the extracted fields and start verification.");
   });
 
-  syncDocumentSelection();
-  if (applications.length && !selectedId) selectedId = applications[0].id;
-  renderAll();
+  initializeBackend();
   setInterval(renderMetrics, 60_000);
 })();

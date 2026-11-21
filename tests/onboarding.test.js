@@ -5,10 +5,12 @@ const { readFileSync } = require("node:fs");
 const path = require("node:path");
 const { test } = require("node:test");
 const { JSDOM } = require("jsdom");
+const workflow = require("../workflow");
 
 const root = path.join(__dirname, "..");
 const html = readFileSync(path.join(root, "index.html"), "utf8");
 const appSource = readFileSync(path.join(root, "app.js"), "utf8");
+const workflowSource = readFileSync(path.join(root, "workflow.js"), "utf8");
 
 function createApplication(overrides = {}) {
   const dom = new JSDOM(html, {
@@ -23,6 +25,7 @@ function createApplication(overrides = {}) {
     this.open = false;
   };
   window.prompt = () => "123456789012";
+  window.eval(workflowSource);
   window.eval(appSource);
 
   const document = window.document;
@@ -82,10 +85,18 @@ async function waitFor(assertion, timeoutMs = 8000) {
   assert.ok(assertion(), `Condition was not met within ${timeoutMs} ms`);
 }
 
+test("workflow graph permits intended steps and rejects skipped checks", () => {
+  assert.equal(workflow.canTransition("submitted", "verifying"), true);
+  assert.equal(workflow.canTransition("needs_review", "ready_for_approval"), true);
+  assert.equal(workflow.canTransition("submitted", "approved"), false);
+  assert.equal(workflow.canTransition("rejected", "submitted"), false);
+});
+
 test("seeded journey retries a failed check, gates approval, and recovers provisioning", async (t) => {
   const dom = new JSDOM(html, { runScripts: "outside-only", url: "http://localhost/" });
   t.after(() => dom.window.close());
   dom.window.prompt = () => "123456789012";
+  dom.window.eval(workflowSource);
   dom.window.eval(appSource);
   const { document } = dom.window;
 

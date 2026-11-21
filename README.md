@@ -32,6 +32,7 @@ The project is intentionally a front-end vertical slice. It does not connect to 
 - **Possible duplicate detection:** New submissions are compared with existing applications by exact email and conservative fuzzy business-name matching. Candidates are shown to an operator and routed to review; they are never automatically rejected or merged.
 - **Callback resilience:** Provider requests have timeouts; duplicate and late callbacks are idempotently ignored and recorded in the audit trail.
 - **Approval and merchant ID:** Approval is only available after all four checks pass. Merchant ID creation is then simulated and recorded.
+- **Optional Node/PostgreSQL backend:** Run the app through the Node server to store application records in PostgreSQL; opening the static demo continues to use browser-local storage.
 - **Audit trail and metrics:** Status counts, average time in the current state, exception rate, provider response latency, callback throughput, and request completion rates are tracked.
 - **Responsive layout:** The queue and detail view adapt to narrower screens; the table scrolls within its panel on mobile.
 
@@ -47,11 +48,9 @@ State-entry timestamps are stored with each application. Existing saved records 
 
 ## Run locally
 
-No package installation or build step is required.
-
 ### Option 1: Open the file
 
-Open `index.html` in a modern browser for the manual-entry demo. Browser behavior for `localStorage` on `file://` URLs varies, and local OCR requires the page to be served over HTTP.
+Open `index.html` in a modern browser for the manual-entry demo. This uses browser-local storage. Browser behavior for `localStorage` on `file://` URLs varies, and local OCR requires the page to be served over HTTP.
 
 ### Option 2: Start a local static server
 
@@ -61,9 +60,24 @@ From the project directory, run:
 py -m http.server 8000
 ```
 
-Then open [http://localhost:8000](http://localhost:8000). Document extraction requires an internet connection to load the pinned PDF.js/Tesseract.js libraries on demand; Tesseract's English language data is fetched when OCR is needed.
+Then open [http://localhost:8000](http://localhost:8000). This remains a browser-local demo. Document extraction requires an internet connection to load the pinned PDF.js/Tesseract.js libraries on demand; Tesseract's English language data is fetched when OCR is needed.
 
-Python is only needed for this optional server command. The application has no package installation or build step. The OCR libraries and English language data are loaded from their CDNs only when extraction is requested. The page also imports DM Sans and Manrope from Google Fonts; if those fonts cannot be fetched, local sans-serif fallbacks are used.
+### Option 3: Run with PostgreSQL persistence
+
+Create a PostgreSQL database, then from the project directory run:
+
+```powershell
+npm install
+$env:DATABASE_URL = "postgres://USER:PASSWORD@localhost:5432/meridian"
+npm run migrate
+npm start
+```
+
+Open [http://localhost:3000](http://localhost:3000). The Node server serves the app and enables the same-origin API. On an empty database, the three fictional sample applications are inserted. The browser uses the API as its source of truth and keeps a local cache; if the API is unavailable at startup, the session falls back to browser-local storage and displays an error.
+
+The API currently supports `GET /api/health`, `GET /api/applications`, `GET /api/applications/:id`, and `PUT /api/applications/:id`. The migration creates the application table; create the database itself before running the migration.
+
+The static demo has no build step. The PostgreSQL backend requires Node.js and the npm dependencies. OCR libraries and English language data are loaded from their CDNs only when extraction is requested. The page also imports DM Sans and Manrope from Google Fonts; if those fonts cannot be fetched, local sans-serif fallbacks are used.
 
 ## Try the demo
 
@@ -147,15 +161,17 @@ Important transition rules:
 
 ## Application data and privacy
 
-Application records are stored in the browser's `localStorage` under:
+In static mode, application records are stored in the browser's `localStorage` under:
 
 ```text
 meridian.onboarding.applications.v1
 ```
 
-Storage is browser- and origin-specific. Applications are not sent to a server, shared with another browser, or protected by user authentication.
+Static-mode storage is browser- and origin-specific. When using the Node/PostgreSQL server, the database is the source of truth and `localStorage` is a browser cache.
 
-PAN and GSTIN values are masked before they are stored. Bank account numbers are reduced to their last four digits. Business and contact details, application state, callback IDs, provider-attempt timestamps, and audit history remain in local storage. **Use fictional data only; do not enter real identity, tax, bank, or personal information.** Browser local storage is not a secure vault.
+PAN and GSTIN values are masked before they are stored. Bank account numbers are reduced to their last four digits. Business and contact details, application state, callback IDs, provider-attempt timestamps, and audit history are stored. **Use fictional data only; do not enter real identity, tax, bank, or personal information.** Browser local storage is not a secure vault.
+
+The backend has no authentication or authorization yet. Anyone who can reach the server can read or update application records, and contact details are stored in PostgreSQL. Do not expose it to an untrusted network or use real merchant data.
 
 Selected files are read and processed in the browser; the file itself and raw OCR text are not uploaded to an application server or saved in local storage. The pinned OCR/PDF libraries and, when needed, English language data are downloaded from CDNs, so the browser makes requests to those CDN hosts. Extracted PAN/GSTIN are masked before storage, bank account values are reduced to their last four digits, and only masked document values are retained for conflicts. OCR is English-only and intended for fictional demo data.
 
@@ -176,7 +192,15 @@ The sample queue will be recreated on reload.
 | --- | --- |
 | `index.html` | Dashboard layout, queue, detail panel, application dialog, and page metadata. |
 | `app.css` | Responsive visual styles, typography, spacing, and component states. |
-| `app.js` | Sample data, local persistence, rendering, form validation, simulated callbacks, state transitions, and audit handling. |
+| `app.js` | Form validation, rendering, backend/local persistence, simulated callbacks, and audit handling. |
+| `runtime-config.js` | Keeps the static demo in local-storage mode; the Node server enables the API at runtime. |
+| `workflow.js` | Shared allowed-state transition map used by the browser and API. |
+| `server.js` | Node API and static application server. |
+| `server/postgres-repository.js` | PostgreSQL application storage and transition enforcement. |
+| `server/migrate.js` | Database migration runner. |
+| `migrations/001_create_applications.sql` | PostgreSQL application table and index. |
+| `package.json` | Server, migration, and test commands plus dependencies. |
+| `tests/` | Browser workflow, API, backend-sync, and repository tests. |
 | `README.md` | Setup guide, walkthrough, workflow description, and limitations. |
 
 ## Validation
@@ -188,12 +212,14 @@ npm install
 npm test
 ```
 
-The suite uses Node's built-in test runner and jsdom to exercise application submission, exception routing, asynchronous provider callbacks, approval gates, provisioning recovery, and bank-detail invalidation. Document OCR itself requires a real browser and is not covered by the automated suite.
+The suite uses Node's built-in test runner and jsdom to exercise API validation and persistence behavior, application submission, exception routing, asynchronous provider callbacks, approval gates, provisioning recovery, and bank-detail invalidation. The API tests use an in-memory repository; running PostgreSQL migrations requires a configured database. Document OCR itself requires a real browser and is not covered by the automated suite.
 
 The JavaScript syntax can also be checked directly:
 
 ```powershell
 node --check app.js
+node --check server.js
+node --check workflow.js
 ```
 
 The document extraction flow can be validated manually using the **Try the demo** steps above.
@@ -205,15 +231,15 @@ The document extraction flow can be validated manually using the **Try the demo*
 - **Document extraction is a bounded local OCR demo.** It supports labeled printed English text in PDFs of up to five pages and PNG/JPEG/WebP/BMP images up to 10 MB. PDF.js reads embedded PDF text and renders scanned pages; Tesseract.js performs OCR on scanned pages and images. A scanned PDF page that takes over 30 seconds to render fails with a visible error. Extraction is pattern-based, does not understand arbitrary layouts or handwriting, and does not verify that separate documents agree. OCR confidence is an engine estimate (page-level scores are shown for OCR fields), not a calibrated probability; embedded PDF text is assigned 100% extraction confidence and is not an OCR confidence score. The 85% review threshold is fixed; failed OCR must be retried or the file removed before manual submission.
 - **Human review is an operator UI state.** Low-confidence, provider-exception, high-risk, and possible-duplicate cases can be routed to review, but there is no separate reviewer account, access control, assignment system, or multi-user coordination. The risk score is selected from a demo-only form option; it is not generated by a risk model.
 - **Duplicate matching is a lightweight heuristic.** It compares exact emails and uses edit-distance similarity for business names; it does not establish identity, perform cross-document entity resolution, or compare identity/tax documents.
-- **Persistence is local only.** `localStorage` is not a database and does not provide server-side transactions, concurrency control, backup, or production-grade audit integrity.
+- **Backend persistence is an initial foundation.** PostgreSQL stores application JSON and enforces state transitions, but the API has no authentication, authorization, optimistic concurrency controls, backup strategy, or production-grade audit integrity. If backend startup fails, the UI falls back to browser-local storage; changes made in that fallback session are not automatically reconciled to the database.
 - **Operational reporting is local and simulated.** Provider latency and throughput are based on browser timers, and the dashboard does not provide production SLAs, cohort trends, alerting, or shared team reporting.
 - **Provisioning is simulated.** Merchant ID creation and payment capability activation are represented by a generated demo ID.
 - This is a demonstration of workflow behavior, not a production onboarding, compliance, or risk-decisioning system.
 
 ## Future Works
 
-- Add a backend API and durable workflow engine with persisted callback events, idempotency keys, timeout handling, and a dead-letter queue.
 - Add authenticated operator and reviewer roles, review assignments, and immutable audit events.
+- Add durable workflow orchestration with persisted callback events, idempotency keys, timeout handling, and a dead-letter queue.
 - Improve extraction with broader document layouts, more languages, calibrated field-level confidence, and cross-document consistency checks.
 - Integrate provider adapters behind a shared interface and support configurable timeouts and provider-specific retry policies.
 - Extend entity matching with verified identifiers, addresses, trading-name aliases, and cross-document evidence.
