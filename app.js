@@ -39,6 +39,17 @@
     rejected: "Rejected",
     provisioning_failed: "Provisioning failed"
   };
+  const ALLOWED_TRANSITIONS = {
+    submitted: ["verifying", "needs_information", "needs_review"],
+    verifying: ["submitted", "ready_for_approval", "needs_review"],
+    needs_information: ["submitted", "verifying"],
+    needs_review: ["needs_information", "submitted", "ready_for_approval"],
+    ready_for_approval: ["approved", "needs_information", "submitted"],
+    approved: ["provisioning_failed", "submitted"],
+    provisioning_failed: ["approved", "submitted"],
+    rejected: []
+  };
+  const BANK_CHANGE_STATES = new Set(["submitted", "needs_review", "ready_for_approval", "approved", "provisioning_failed"]);
   const $ = (selector) => document.querySelector(selector);
   const rowsEl = $("#application-rows");
   const detailEl = $("#detail-panel");
@@ -124,11 +135,19 @@
   }
 
   function transitionState(app, nextState, enteredAt = Date.now()) {
-    if (app.status === nextState) return;
+    if (app.status === nextState) return true;
+    if (!ALLOWED_TRANSITIONS[app.status]?.includes(nextState)) {
+      const currentLabel = STATE_LABELS[app.status] || app.status;
+      const nextLabel = STATE_LABELS[nextState] || nextState;
+      console.error(`Invalid onboarding state transition for ${app.id}: ${currentLabel} -> ${nextLabel}.`);
+      toast("That application action is not available in its current state.", true);
+      return false;
+    }
     app.status = nextState;
     app.stateSince = enteredAt;
     app.stateHistory = app.stateHistory || [];
     app.stateHistory.push({ state: nextState, at: enteredAt });
+    return true;
   }
 
   function routeForLowConfidence(app, enteredAt = Date.now()) {
@@ -138,7 +157,7 @@
     }
     const hasMissingInformation = Array.isArray(app.missing) && app.missing.length > 0;
     const nextState = hasMissingInformation ? "needs_information" : "needs_review";
-    transitionState(app, nextState, enteredAt);
+    if (!transitionState(app, nextState, enteredAt)) return false;
     app.reviewNote = app.document.needsReview
       ? "No supported fields could be extracted from the document. Request a clearer document and manually confirm the entered values."
       : `Document confidence is ${app.document.confidence}%, below the ${LOW_CONFIDENCE_THRESHOLD}% review threshold.`;
@@ -155,8 +174,8 @@
     if (!conflicts.length) return false;
     const fieldLabels = { businessName: "business name", pan: "PAN", gst: "GSTIN", bankAccount: "bank account" };
     const labels = conflicts.map((key) => fieldLabels[key] || key);
+    if (!transitionState(app, "needs_review", enteredAt)) return false;
     app.document.conflicts = conflicts;
-    transitionState(app, "needs_review", enteredAt);
     app.reviewNote = `The document values conflict with the application form for: ${labels.join(", ")}. Confirm the correct values before continuing.`;
     app.audit.push({
       at: enteredAt,
@@ -227,8 +246,8 @@
 
   function routeForDuplicateReview(app, matches, enteredAt = Date.now()) {
     if (!matches.length) return false;
+    if (!transitionState(app, "needs_review", enteredAt)) return false;
     app.possibleDuplicates = matches;
-    transitionState(app, "needs_review", enteredAt);
     app.reviewNote = "A possible duplicate matched an exact contact email or a similar business name. Confirm whether these applications belong to the same merchant before continuing.";
     if (app.document.needsReview) app.reviewNote += " Document extraction found no supported fields; request a clearer document.";
     else if (app.document.confidence < LOW_CONFIDENCE_THRESHOLD) app.reviewNote += ` Document confidence is also below the ${LOW_CONFIDENCE_THRESHOLD}% review threshold.`;
@@ -518,14 +537,20 @@
             ? `<div class="alert-box" style="border-color:#d9ecdf;background:#f5fbf7;color:#44735a"><strong>Merchant is ready</strong>Merchant ID <b>${esc(app.mid || "pending")}</b> is active in this sandbox.</div>`
             : "";
     const canStart = ["submitted", "needs_information"].includes(app.status) && pending;
+    const canRequestInfo = ["submitted", "needs_review", "ready_for_approval"].includes(app.status);
+    const canChangeBank = BANK_CHANGE_STATES.has(app.status);
     const actions = app.status === "approved"
       ? `<button class="button button-subtle button-small" data-action="change-bank">Change bank details</button>`
       : app.status === "needs_information"
         ? `<button class="button button-primary button-small" data-action="resume-info">Resume verification</button>`
-        : `<button class="button button-primary button-small ${canStart ? "" : "button-disabled"}" data-action="run-checks" ${canStart ? "" : "disabled"}>${app.status === "verifying" ? "Callbacks in progress…" : allPassed ? "All checks passed" : "Run verification checks"} <span>→</span></button>
-           <button class="button button-subtle button-small" data-action="need-info">Request information</button>
-           <button class="button button-subtle button-small" data-action="change-bank">Edit bank details</button>
-           ${app.status === "ready_for_approval" ? '<button class="button button-subtle button-small" data-action="approve">Approve application</button>' : ""}`;
+        : app.status === "verifying"
+          ? `<button class="button button-primary button-small button-disabled" disabled>Callbacks in progress…</button>`
+          : app.status === "provisioning_failed"
+            ? `<button class="button button-subtle button-small" data-action="change-bank">Edit bank details</button>`
+            : `<button class="button button-primary button-small ${canStart ? "" : "button-disabled"}" data-action="run-checks" ${canStart ? "" : "disabled"}>${allPassed ? "All checks passed" : "Run verification checks"} <span>→</span></button>
+               ${canRequestInfo ? '<button class="button button-subtle button-small" data-action="need-info">Request information</button>' : ""}
+               ${canChangeBank ? '<button class="button button-subtle button-small" data-action="change-bank">Edit bank details</button>' : ""}
+               ${app.status === "ready_for_approval" ? '<button class="button button-subtle button-small" data-action="approve">Approve application</button>' : ""}`;
     detailEl.innerHTML = `
       <div class="detail-header"><div class="detail-title-row"><div class="detail-merchant"><span class="merchant-avatar tone-${app._tone ?? 0}">${esc(initials(app.businessName))}</span><div><div class="detail-name">${esc(app.businessName)}</div><div class="detail-id">${esc(app.id)}</div></div></div><button class="icon-button" type="button" aria-label="More application actions" title="Application actions">···</button></div>
       <div class="detail-date">Submitted ${esc(formatDate(app.submittedAt))} · ${esc(app.contactName || "Merchant contact")}</div><div class="detail-status"><span class="status-pill ${statusClass(app.status)}">${esc(STATE_LABELS[app.status])}</span>${app.mid ? ` <span class="merchant-id">MID ${esc(app.mid)}</span>` : ""}</div></div>
@@ -552,29 +577,36 @@
     } else if (action === "retry-failed") {
       failedRetry(app);
     } else if (action === "need-info") {
-      transitionState(app, "needs_information");
+      if (!["submitted", "needs_review", "ready_for_approval"].includes(app.status)) {
+        toast("Request additional information after verification has paused.", true);
+        return;
+      }
+      if (!transitionState(app, "needs_information")) return;
       app.missing = ["Please provide a clearer document or confirm the submitted business details."];
       addAudit(app, "Additional information requested by operator.");
       persist(); renderAll(); toast("Information request recorded.");
     } else if (action === "resolve-info") {
+      if (app.status !== "needs_information") return;
       app.missing = [];
-      transitionState(app, "submitted");
+      if (!transitionState(app, "submitted")) return;
       addAudit(app, "Merchant information received; application is ready for verification.");
       persist(); renderAll(); toast("Missing information marked as received.");
     } else if (action === "resume-info") {
+      if (app.status !== "needs_information") return;
       app.missing = [];
-      transitionState(app, "submitted");
+      if (!transitionState(app, "submitted")) return;
       addAudit(app, "Merchant information confirmed by operator.");
       persist(); renderAll();
       startVerification(app);
     } else if (action === "approve") {
       approve(app);
     } else if (action === "review") {
-      transitionState(app, "needs_review");
+      if (app.status !== "needs_review" || !transitionState(app, "needs_review")) return;
       app.reviewNote = "A failed provider match requires human review.";
       addAudit(app, "Application escalated to human review after a failed provider check.");
       persist(); renderAll(); toast("Application added to the review queue.");
     } else if (action === "review-clear") {
+      if (app.status !== "needs_review") return;
       if (CHECK_ORDER.some((key) => app.checks[key] === "failed")) {
         toast("Retry failed provider checks before clearing this review.", true);
         return;
@@ -582,11 +614,11 @@
       app.reviewNote = "";
       addAudit(app, "Operator resolved the manual review.");
       if (CHECK_ORDER.every((key) => app.checks[key] === "passed")) {
-        transitionState(app, "ready_for_approval");
+        if (!transitionState(app, "ready_for_approval")) return;
         persist(); renderAll();
         toast("Review resolved. The application is ready for approval.");
       } else {
-        transitionState(app, "submitted");
+        if (!transitionState(app, "submitted")) return;
         persist(); renderAll();
         startVerification(app);
       }
@@ -599,6 +631,10 @@
 
   function startVerification(app) {
     if (app.status === "verifying") return;
+    if (!["submitted", "needs_information"].includes(app.status)) {
+      toast("Verification can only start from a submitted application.", true);
+      return;
+    }
     if (app.bankChanged) {
       app.checks.bank = "pending";
       app.checks.risk = "pending";
@@ -612,10 +648,11 @@
       app.bankChanged = false;
       addAudit(app, "Bank details changed; bank and risk checks reset for re-verification.");
     }
-    transitionState(app, "verifying");
+    if (!transitionState(app, "verifying")) return;
     const toRun = CHECK_ORDER.filter((key) => app.checks[key] === "pending");
     if (!toRun.length) {
-      transitionState(app, CHECK_ORDER.every((key) => app.checks[key] === "passed") ? "ready_for_approval" : "needs_review");
+      const nextState = CHECK_ORDER.every((key) => app.checks[key] === "passed") ? "ready_for_approval" : "needs_review";
+      if (!transitionState(app, nextState)) return;
       persist();
       renderAll();
       return;
@@ -801,8 +838,13 @@
   }
 
   function failedRetry(app) {
+    if (app.status !== "needs_review") {
+      toast("Failed checks can only be retried from manual review.", true);
+      return;
+    }
     const failed = CHECK_ORDER.filter((key) => app.checks[key] === "failed");
     if (!failed.length) return;
+    if (!transitionState(app, "submitted")) return;
     app.providerAttempts = app.providerAttempts || {};
     failed.forEach((key) => {
       app.checks[key] = "pending";
@@ -812,7 +854,6 @@
     app.demoGstFailure = false;
     app.demoLateCallback = false;
     app.reviewNote = "";
-    transitionState(app, "submitted");
     addAudit(app, `Operator retried ${failed.map((key) => CHECK_LABELS[key]).join(", ")}.`);
     persist(); renderAll(); startVerification(app);
   }
@@ -822,8 +863,7 @@
       toast("Approval is blocked until every verification check passes and the application is ready.", true);
       return;
     }
-    if (app.status === "approved") return;
-    transitionState(app, "approved");
+    if (!transitionState(app, "approved")) return;
     addAudit(app, "Application approved by operator.");
     persist(); renderAll();
     createMerchantId(app);
@@ -835,32 +875,39 @@
       return;
     }
     if (app.mid) { toast(`Merchant ID ${app.mid} is already active.`); return; }
-    app.provisioningAttempts = (app.provisioningAttempts || 0) + 1;
-    if (app.demoProvisioningFailure && app.provisioningAttempts === 1) {
-      transitionState(app, "provisioning_failed");
+    const provisioningAttempt = (app.provisioningAttempts || 0) + 1;
+    if (app.demoProvisioningFailure && provisioningAttempt === 1) {
+      if (!transitionState(app, "provisioning_failed")) return;
+      app.provisioningAttempts = provisioningAttempt;
       app.reviewNote = "All checks passed and approval was recorded, but the simulated merchant-ID service is unavailable.";
       addAudit(app, "Merchant ID service failed after approval; safe to retry without duplicate creation.");
       persist(); renderAll(); toast("Approval saved, but merchant ID creation failed. Retry is available.", true);
       return;
     }
+    if (!transitionState(app, "approved")) return;
+    app.provisioningAttempts = provisioningAttempt;
     app.mid = `MID-${Math.floor(100000 + Math.random() * 900000)}`;
-    transitionState(app, "approved");
     app.reviewNote = "";
     addAudit(app, `Merchant ID ${app.mid} created and payment capabilities enabled.`);
     persist(); renderAll(); toast(`Merchant approved. ${app.mid} is ready.`);
   }
 
   function changeBank(app) {
+    if (!BANK_CHANGE_STATES.has(app.status)) {
+      toast("Bank details cannot be changed while verification is in progress.", true);
+      return;
+    }
     const value = window.prompt("Enter the updated bank account number (8–18 digits). Do not use a real account in this demo.", "");
     if (value === null) return;
     const normalized = value.replace(/\s+/g, "");
     if (!/^\d{8,18}$/.test(normalized)) { toast("Enter a bank account number with 8 to 18 digits.", true); return; }
+    const hasOtherFailedChecks = ["pan", "gst"].some((key) => app.checks[key] === "failed");
+    if (!transitionState(app, hasOtherFailedChecks ? "needs_review" : "submitted")) return;
     app.bankAccount = `•••• ${normalized.slice(-4)}`;
     app.checks.bank = "pending";
     app.checks.risk = "pending";
     app.mid = null;
     app.bankChanged = true;
-    transitionState(app, "submitted");
     app.reviewNote = "";
     addAudit(app, "Bank details changed by operator; bank and risk verification invalidated.");
     persist(); renderAll(); toast("Bank details updated. Bank and risk checks must be run again.");

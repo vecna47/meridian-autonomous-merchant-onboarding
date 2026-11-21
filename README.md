@@ -131,6 +131,7 @@ After the seeded Aster & Oak application is approved and provisioned, choose **C
 Important transition rules:
 
 - The four required checks are PAN, GST, bank account, and risk.
+- State changes are checked against an explicit allowed-transition map. Information requests and bank edits are not available while provider checks are running.
 - Approval is blocked unless all four check statuses are `passed` and the application is `ready_for_approval`.
 - A failed provider result moves the application to `needs_review`; it cannot be approved directly.
 - Risk scores at or above 70/100 pass the risk provider check but move the application to `needs_review`. Approval stays blocked until an operator resolves the review and all required checks have passed.

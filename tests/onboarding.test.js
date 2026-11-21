@@ -68,6 +68,11 @@ function auditContains(document, text) {
     .some((event) => event.textContent.includes(text));
 }
 
+function auditCount(document, text) {
+  return [...document.querySelectorAll("#detail-panel .audit-copy")]
+    .filter((event) => event.textContent.includes(text)).length;
+}
+
 async function waitFor(assertion, timeoutMs = 8000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -90,6 +95,12 @@ test("seeded journey retries a failed check, gates approval, and recovers provis
   assert.equal(checkResults(document)["GST verification"], "Failed");
   assert.equal(document.querySelector('[data-action="approve"]'), null);
   assert.ok(auditContains(document, "Duplicate PAN verification callback ignored"));
+
+  document.querySelector('[data-action="change-bank"]').click();
+  assert.equal(statusOf(document), "Needs review");
+  assert.equal(checkResults(document)["GST verification"], "Failed");
+  assert.equal(checkResults(document)["Bank account"], "Pending");
+  assert.equal(checkResults(document)["Risk screening"], "Pending");
 
   document.querySelector('[data-action="retry-failed"]').click();
   await waitFor(() => statusOf(document) === "Ready for approval");
@@ -123,6 +134,32 @@ test("new applications route duplicates and low-confidence submissions to review
   t.after(() => lowConfidence.dom.window.close());
   assert.equal(statusOf(lowConfidence.document), "Needs review");
   assert.match(lowConfidence.document.querySelector("#detail-panel").textContent, /below the 85% review threshold/);
+});
+
+test("information requests follow allowed transitions and cannot interrupt checks", async (t) => {
+  const app = createApplication({ email: "info@northstar.example" });
+  t.after(() => app.dom.window.close());
+
+  app.document.querySelector('[data-action="need-info"]').click();
+  assert.equal(statusOf(app.document), "Needs information");
+  app.document.querySelector('[data-action="resolve-info"]').click();
+  assert.equal(statusOf(app.document), "Submitted");
+
+  const staleRequestInfo = app.document.querySelector('[data-action="need-info"]');
+  const staleChangeBank = app.document.querySelector('[data-action="change-bank"]');
+  const informationRequestCount = auditCount(app.document, "Additional information requested");
+  app.document.querySelector('[data-action="run-checks"]').click();
+  await waitFor(() => statusOf(app.document) === "Verifying");
+  assert.equal(app.document.querySelector('[data-action="need-info"]'), null);
+  assert.equal(app.document.querySelector('[data-action="change-bank"]'), null);
+
+  staleRequestInfo.click();
+  staleChangeBank.click();
+  assert.equal(statusOf(app.document), "Verifying");
+  assert.equal(auditCount(app.document, "Additional information requested"), informationRequestCount);
+
+  await waitFor(() => statusOf(app.document) === "Ready for approval");
+  assert.ok(Object.values(checkResults(app.document)).every((result) => result === "Passed"));
 });
 
 test("high-risk applications require review even when every check passes", async (t) => {
